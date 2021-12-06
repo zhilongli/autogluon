@@ -1,6 +1,7 @@
 import copy
 import logging
 import time
+import warnings
 from builtins import classmethod
 from pathlib import Path
 
@@ -94,6 +95,10 @@ class NNFastAiTabularModel(AbstractModel):
         from fastai.tabular.core import FillMissing, Categorify, Normalize
         self.procs = [FillMissing, Categorify, Normalize]
 
+        if self.problem_type == REGRESSION:
+            self._max_y = max(y.max(), y_val.max())
+            self._min_y = min(y.min(), y_val.min())
+
         if self.problem_type in [REGRESSION, QUANTILE] and self.y_scaler is not None:
             y_norm = pd.Series(self.y_scaler.fit_transform(y.values.reshape(-1, 1)).reshape(-1))
             y_val_norm = pd.Series(self.y_scaler.transform(y_val.values.reshape(-1, 1)).reshape(-1)) if y_val is not None else None
@@ -106,16 +111,20 @@ class NNFastAiTabularModel(AbstractModel):
         df_train, train_idx, val_idx = self._generate_datasets(X, y_norm, X_val, y_val_norm)
         y_block = RegressionBlock() if self.problem_type in [REGRESSION, QUANTILE] else CategoryBlock()
 
-        # Copy cat_columns and cont_columns because TabularList is mutating the list
-        data = TabularPandas(
-            df_train,
-            cat_names=self.cat_columns.copy(),
-            cont_names=self.cont_columns.copy(),
-            procs=self.procs,
-            y_block=y_block,
-            y_names=LABEL,
-            splits=IndexSplitter(val_idx)(range_of(df_train)),
-        )
+        with warnings.catch_warnings():
+            # Filter warnings to avoid unnecessary warning from FastAI about inplace copying.
+            warnings.filterwarnings("ignore", category=UserWarning)
+            # Copy cat_columns and cont_columns because TabularList is mutating the list
+            data = TabularPandas(
+                df_train,
+                cat_names=self.cat_columns.copy(),
+                cont_names=self.cont_columns.copy(),
+                procs=self.procs,
+                y_block=y_block,
+                y_names=LABEL,
+                splits=IndexSplitter(val_idx)(range_of(df_train)),
+                inplace=True,
+            )
         return data
 
     def _preprocess(self, X: pd.DataFrame, fit=False, **kwargs):
@@ -225,6 +234,11 @@ class NNFastAiTabularModel(AbstractModel):
 
         best_epoch_stop = params.get("best_epoch", None)  # Use best epoch for refit_full.
         dls = data.dataloaders(bs=self.params['bs'] if len(X) > self.params['bs'] else 32)
+
+        # Make deterministic
+        from fastai.torch_core import set_seed
+        set_seed(0, True)
+        dls.rng.seed(0)
 
         if self.problem_type == QUANTILE:
             dls.c = len(self.quantile_levels)
@@ -337,9 +351,15 @@ class NNFastAiTabularModel(AbstractModel):
             preds = preds[:1, :]
         if self.problem_type == REGRESSION:
             if self.y_scaler is not None:
-                return self.y_scaler.inverse_transform(preds.numpy()).reshape(-1)
+                preds = self.y_scaler.inverse_transform(preds.numpy()).reshape(-1)
             else:
-                return preds.numpy().reshape(-1)
+                preds = preds.numpy().reshape(-1)
+
+            # Enforce predictions to be bounded
+            preds[preds > self._max_y] = self._max_y
+            preds[preds < self._min_y] = self._min_y
+
+            return preds
         elif self.problem_type == QUANTILE:
             from .quantile_helpers import isotonic
             if self.y_scaler is not None:
