@@ -47,6 +47,7 @@ class BaggedEnsembleModel(AbstractModel):
         # FIXME: Avoid unnecessary refit during refit_full on `_child_oof=True` models, just re-use the original model.
         self._child_oof = False  # Whether the OOF preds were taken from a single child model (Assumes child can produce OOF preds without bagging).
         self._cv_splitters = []  # Keeps track of the CV splitter used for each bagged repeat.
+        self._oof_noise = 0
 
         super().__init__(problem_type=self.model_base.problem_type, eval_metric=self.model_base.eval_metric, **kwargs)
 
@@ -176,6 +177,9 @@ class BaggedEnsembleModel(AbstractModel):
         save_bag_folds = self.params.get('save_bag_folds', True)
         if k_fold == 1:
             self._fit_single(X=X, y=y, model_base=model_base, use_child_oof=use_child_oof, **kwargs)
+            if X_val is not None:
+                self.compute_optimal_oof_noise(X=X, y=y, X_val=X_val, y_val=y_val, sample_weight=sample_weight, sample_weight_val=sample_weight_val)
+
             return self
         else:
             refit_folds = self.params.get('refit_folds', False)
@@ -190,6 +194,10 @@ class BaggedEnsembleModel(AbstractModel):
             self._fit_folds(X=X, y=y, model_base=model_base, X_pseudo=X_pseudo, y_pseudo=y_pseudo,
                             k_fold=k_fold, k_fold_start=k_fold_start, k_fold_end=k_fold_end,
                             n_repeats=n_repeats, n_repeat_start=n_repeat_start, save_folds=save_bag_folds, groups=groups, **kwargs)
+
+            if X_val is not None:
+                self.compute_optimal_oof_noise(X=X, y=y, X_val=X_val, y_val=y_val, sample_weight=sample_weight, sample_weight_val=sample_weight_val)
+
             # FIXME: Don't save folds except for refit
             # FIXME: Cleanup self
             # FIXME: Don't add `_FULL` to name
@@ -266,6 +274,28 @@ class BaggedEnsembleModel(AbstractModel):
         if sample_weight is not None:
             sample_weight = sample_weight[valid_indices]
         return self.score_with_y_pred_proba(y=y, y_pred_proba=y_pred_proba, sample_weight=sample_weight)
+
+    def compute_optimal_oof_noise(self, X, y, X_val, y_val, sample_weight=None, sample_weight_val=None):
+        val_pred_proba = pd.DataFrame(self.predict_proba(X_val))
+        oof_pred_proba_init = pd.DataFrame(self.get_oof_pred_proba())
+        from .utils.oof import compute_optimal_oof_noise
+        oof_noise_scale, oof_noise = compute_optimal_oof_noise(
+            X=X,
+            y=y,
+            X_val=X_val,
+            y_val=y_val,
+            oof_pred_proba_init=oof_pred_proba_init,
+            val_pred_proba=val_pred_proba,
+            problem_type=self.problem_type,
+            metric=self.eval_metric,
+            sample_weight=sample_weight,
+            sample_weight_val=sample_weight_val,
+            quantile_levels=self.quantile_levels,
+        )
+
+        self._oof_noise = oof_noise_scale
+        self._oof_pred_proba += oof_noise  # FIXME: Don't do this, doesn't work correctly for repeats either
+
 
     def _fit_single(self, X, y, model_base, use_child_oof, time_limit=None, **kwargs):
         if self.is_fit():
