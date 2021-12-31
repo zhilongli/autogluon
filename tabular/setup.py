@@ -43,7 +43,7 @@ extras_require = {
         'fastai>=2.3.1,<3.0',
     ],
     'skex': [
-        'scikit-learn-intelex>=2021.4,<2021.5',
+        'scikit-learn-intelex>=2021.5,<2021.6',
     ],
 }
 
