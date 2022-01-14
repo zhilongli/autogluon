@@ -24,7 +24,7 @@ install_requires = [
     'scikit-learn',
 
     f'autogluon.core=={version}',
-    'autogluon-contrib-nlp==0.0.1b20210201',
+    'autogluon-contrib-nlp',
 ]
 
 install_requires = ag.get_dependency_version_ranges(install_requires)
